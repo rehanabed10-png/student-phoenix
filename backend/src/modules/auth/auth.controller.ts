@@ -14,6 +14,8 @@ import { AuthService } from './auth.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { ChangePasswordDto } from './dto/change-password.dto.js';
+import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
+import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { AuthResponseDto } from './dto/auth-response.dto.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import type { AuthenticatedUser } from './types/authenticated-user.js';
@@ -117,6 +119,32 @@ export class AuthController {
     @Body() dto: ChangePasswordDto,
   ): Promise<{ message: string }> {
     return this.authService.changePassword(req.user.id, dto);
+  }
+
+  /**
+   * POST /api/auth/forgot-password
+   * Requests a password reset link for the provided email address.
+   * Public endpoint. Defends against account enumeration with generic response.
+   */
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(
+    @Body() dto: ForgotPasswordDto,
+  ): Promise<{ message: string }> {
+    return this.authService.requestPasswordReset(dto);
+  }
+
+  /**
+   * POST /api/auth/reset-password
+   * Resets the user's password using a verified reset token.
+   * Public endpoint. The reset token is the credential.
+   */
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(
+    @Body() dto: ResetPasswordDto,
+  ): Promise<{ message: string }> {
+    return this.authService.resetPassword(dto);
   }
 }
 

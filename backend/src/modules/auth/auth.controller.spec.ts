@@ -38,6 +38,13 @@ describe('AuthController', () => {
       changePassword: vi
         .fn()
         .mockResolvedValue({ message: 'Password changed successfully.' }),
+      requestPasswordReset: vi.fn().mockResolvedValue({
+        message:
+          'If an account exists for this email, a password reset link has been requested.',
+      }),
+      resetPassword: vi
+        .fn()
+        .mockResolvedValue({ message: 'Password reset successfully.' }),
       setRefreshTokenCookie: vi.fn(),
       clearRefreshTokenCookie: vi.fn(),
     };
@@ -192,6 +199,48 @@ describe('AuthController', () => {
         dto,
       );
       expect(result).toEqual({ message: 'Password changed successfully.' });
+    });
+  });
+
+  describe('forgotPassword', () => {
+    it('does NOT have JwtAuthGuard metadata (public endpoint)', () => {
+      const guards = Reflect.getMetadata(
+        '__guards__',
+        controller.forgotPassword,
+      );
+      expect(guards).toBeUndefined();
+    });
+
+    it('delegates dto to AuthService.requestPasswordReset and returns generic response', async () => {
+      const dto = { email: 'student@phoenix.edu' };
+      const result = await controller.forgotPassword(dto);
+
+      expect(mockAuthService.requestPasswordReset).toHaveBeenCalledWith(dto);
+      expect(result).toEqual({
+        message:
+          'If an account exists for this email, a password reset link has been requested.',
+      });
+    });
+  });
+
+  describe('resetPassword', () => {
+    it('does NOT have JwtAuthGuard metadata (public endpoint)', () => {
+      const guards = Reflect.getMetadata(
+        '__guards__',
+        controller.resetPassword,
+      );
+      expect(guards).toBeUndefined();
+    });
+
+    it('delegates dto to AuthService.resetPassword and returns success message', async () => {
+      const dto = {
+        token: 'raw-reset-token-64chars',
+        newPassword: 'BrandNewSecurePassword123!',
+      };
+      const result = await controller.resetPassword(dto);
+
+      expect(mockAuthService.resetPassword).toHaveBeenCalledWith(dto);
+      expect(result).toEqual({ message: 'Password reset successfully.' });
     });
   });
 });

@@ -11,6 +11,8 @@ import { TokenService } from './token.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { ChangePasswordDto } from './dto/change-password.dto.js';
+import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
+import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { AuthResponseDto } from './dto/auth-response.dto.js';
 import type { RefreshToken } from '@prisma/client';
 import {
@@ -280,6 +282,140 @@ export class AuthService {
     });
 
     return { message: 'Password changed successfully.' };
+  }
+
+  /**
+   * Generates a password reset token for the given email and records it in a hashed format.
+   * Defends against account enumeration by returning a generic response whether or not the account exists.
+   * Invalidates previously issued active reset tokens for the user atomically.
+   */
+  async requestPasswordReset(
+    dto: ForgotPasswordDto,
+  ): Promise<{ message: string }> {
+    const genericResponse = {
+      message:
+        'If an account exists for this email, a password reset link has been requested.',
+    };
+
+    const normalizedEmail = dto.email.toLowerCase().trim();
+    const user = await this.usersService.findByEmail(normalizedEmail);
+
+    if (!user) {
+      return genericResponse;
+    }
+
+    const rawToken = this.tokenService.generatePasswordResetToken();
+    const tokenHash = this.tokenService.hashPasswordResetToken(rawToken);
+    const expiresAt = this.tokenService.getPasswordResetExpiresAt();
+
+    // Atomic transaction: invalidate previous active reset tokens for this user and store new token hash
+    await this.prisma.$transaction(async (tx) => {
+      await tx.passwordResetToken.updateMany({
+        where: {
+          userId: user.id,
+          usedAt: null,
+        },
+        data: {
+          usedAt: new Date(),
+        },
+      });
+
+      await tx.passwordResetToken.create({
+        data: {
+          tokenHash,
+          userId: user.id,
+          expiresAt,
+        },
+      });
+    });
+
+    return genericResponse;
+  }
+
+  /**
+   * Resets the user password using a raw reset token.
+   * Validates token existence, expiration, and unused status.
+   * Performs an atomic state transition: updates user passwordHash, marks the reset token used
+   * conditionally (usedAt: null concurrency guard), and revokes all active refresh tokens for the user.
+   */
+  async resetPassword(
+    dto: ResetPasswordDto,
+  ): Promise<{ message: string }> {
+    const tokenHash = this.tokenService.hashPasswordResetToken(dto.token);
+
+    const resetTokenRecord = await this.prisma.passwordResetToken.findUnique({
+      where: { tokenHash },
+      include: { user: true },
+    });
+
+    if (!resetTokenRecord) {
+      throw new UnauthorizedException(
+        'Invalid or expired password reset token.',
+      );
+    }
+
+    if (resetTokenRecord.usedAt !== null) {
+      throw new UnauthorizedException(
+        'Invalid or expired password reset token.',
+      );
+    }
+
+    if (resetTokenRecord.expiresAt <= new Date()) {
+      throw new UnauthorizedException(
+        'Invalid or expired password reset token.',
+      );
+    }
+
+    if (!resetTokenRecord.user) {
+      throw new UnauthorizedException(
+        'Invalid or expired password reset token.',
+      );
+    }
+
+    const policyResult = this.passwordService.validatePolicy(dto.newPassword);
+    if (!policyResult.isValid) {
+      throw new BadRequestException(policyResult.errors.join(' '));
+    }
+
+    const newPasswordHash = await this.passwordService.hash(dto.newPassword);
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Update user's passwordHash
+      await tx.user.update({
+        where: { id: resetTokenRecord.userId },
+        data: { passwordHash: newPasswordHash },
+      });
+
+      // 2. Mark reset token as used with concurrency protection (must be currently unused)
+      const tokenUpdateResult = await tx.passwordResetToken.updateMany({
+        where: {
+          id: resetTokenRecord.id,
+          usedAt: null,
+        },
+        data: {
+          usedAt: new Date(),
+        },
+      });
+
+      if (tokenUpdateResult.count !== 1) {
+        throw new UnauthorizedException(
+          'Invalid or expired password reset token.',
+        );
+      }
+
+      // 3. Revoke all active refresh sessions for the user
+      await tx.refreshToken.updateMany({
+        where: {
+          userId: resetTokenRecord.userId,
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: new Date(),
+        },
+      });
+    });
+
+    return { message: 'Password reset successfully.' };
   }
 
   /**

@@ -57,6 +57,11 @@ describe('AuthService', () => {
         update: vi.fn().mockResolvedValue({ id: 'token-uuid-1' }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      passwordResetToken: {
+        create: vi.fn().mockResolvedValue({ id: 'reset-token-uuid-1' }),
+        findUnique: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
       $transaction: vi
         .fn()
         .mockImplementation((callback) => callback(mockPrisma)),
@@ -93,6 +98,17 @@ describe('AuthService', () => {
         .fn()
         .mockReturnValue(7 * 24 * 60 * 60 * 1000),
       getRefreshTokenExpiresAt: vi.fn().mockReturnValue(mockExpiresAt),
+      generatePasswordResetToken: vi
+        .fn()
+        .mockReturnValue('raw-reset-token-64chars'),
+      hashPasswordResetToken: vi
+        .fn()
+        .mockImplementation((token: string) => `hashed-${token}`),
+      getPasswordResetExpiresIn: vi.fn().mockReturnValue('30m'),
+      getPasswordResetExpiresInMs: vi.fn().mockReturnValue(30 * 60 * 1000),
+      getPasswordResetExpiresAt: vi
+        .fn()
+        .mockReturnValue(new Date('2026-10-01T00:30:00Z')),
     };
 
     authService = new AuthService(
@@ -664,6 +680,203 @@ describe('AuthService', () => {
       });
       const updateData = mockPrisma.user.update.mock.calls[0][0].data;
       expect(Object.keys(updateData)).toEqual(['passwordHash']);
+    });
+  });
+
+  describe('requestPasswordReset', () => {
+    it('generates a hashed reset token, invalidates previous active tokens, and returns generic message for existing email', async () => {
+      const result = await authService.requestPasswordReset({
+        email: 'Student@Phoenix.EDU',
+      });
+
+      expect(mockUsersService.findByEmail).toHaveBeenCalledWith(
+        'student@phoenix.edu',
+      );
+      expect(mockTokenService.generatePasswordResetToken).toHaveBeenCalled();
+      expect(mockTokenService.hashPasswordResetToken).toHaveBeenCalledWith(
+        'raw-reset-token-64chars',
+      );
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+      expect(mockPrisma.passwordResetToken.updateMany).toHaveBeenCalledWith({
+        where: {
+          userId: mockUser.id,
+          usedAt: null,
+        },
+        data: {
+          usedAt: expect.any(Date),
+        },
+      });
+      expect(mockPrisma.passwordResetToken.create).toHaveBeenCalledWith({
+        data: {
+          tokenHash: 'hashed-raw-reset-token-64chars',
+          userId: mockUser.id,
+          expiresAt: new Date('2026-10-01T00:30:00Z'),
+        },
+      });
+      expect(result).toEqual({
+        message:
+          'If an account exists for this email, a password reset link has been requested.',
+      });
+    });
+
+    it('returns the same generic response and performs no database mutations if email does not exist (account enumeration defense)', async () => {
+      mockUsersService.findByEmail.mockResolvedValue(null);
+
+      const result = await authService.requestPasswordReset({
+        email: 'nonexistent@phoenix.edu',
+      });
+
+      expect(mockUsersService.findByEmail).toHaveBeenCalledWith(
+        'nonexistent@phoenix.edu',
+      );
+      expect(mockTokenService.generatePasswordResetToken).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockPrisma.passwordResetToken.create).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        message:
+          'If an account exists for this email, a password reset link has been requested.',
+      });
+    });
+  });
+
+  describe('resetPassword', () => {
+    const validResetDto = {
+      token: 'valid-reset-token-raw',
+      newPassword: 'BrandNewSecurePassword123!',
+    };
+
+    const mockResetRecord = {
+      id: 'reset-token-uuid-1',
+      tokenHash: 'hashed-valid-reset-token-raw',
+      userId: mockUser.id,
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 mins in future
+      usedAt: null,
+      user: mockUser,
+      createdAt: new Date(),
+    };
+
+    beforeEach(() => {
+      mockPrisma.passwordResetToken.findUnique.mockResolvedValue(
+        mockResetRecord,
+      );
+    });
+
+    it('resets password, marks token used with concurrency protection, revokes refresh sessions, and returns success message', async () => {
+      const result = await authService.resetPassword(validResetDto);
+
+      expect(mockTokenService.hashPasswordResetToken).toHaveBeenCalledWith(
+        'valid-reset-token-raw',
+      );
+      expect(mockPrisma.passwordResetToken.findUnique).toHaveBeenCalledWith({
+        where: { tokenHash: 'hashed-valid-reset-token-raw' },
+        include: { user: true },
+      });
+      expect(mockPasswordService.validatePolicy).toHaveBeenCalledWith(
+        'BrandNewSecurePassword123!',
+      );
+      expect(mockPasswordService.hash).toHaveBeenCalledWith(
+        'BrandNewSecurePassword123!',
+      );
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+      expect(mockPrisma.user.update).toHaveBeenCalledWith({
+        where: { id: mockUser.id },
+        data: { passwordHash: '$argon2id$hashedpassword' },
+      });
+      expect(mockPrisma.passwordResetToken.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'reset-token-uuid-1',
+          usedAt: null,
+        },
+        data: {
+          usedAt: expect.any(Date),
+        },
+      });
+      expect(mockPrisma.refreshToken.updateMany).toHaveBeenCalledWith({
+        where: {
+          userId: mockUser.id,
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: expect.any(Date),
+        },
+      });
+      expect(result).toEqual({ message: 'Password reset successfully.' });
+      expect(result).not.toHaveProperty('accessToken');
+      expect(result).not.toHaveProperty('refreshToken');
+      expect(result).not.toHaveProperty('passwordHash');
+    });
+
+    it('throws UnauthorizedException if reset token does not exist', async () => {
+      mockPrisma.passwordResetToken.findUnique.mockResolvedValue(null);
+
+      await expect(authService.resetPassword(validResetDto)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockPasswordService.hash).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws UnauthorizedException if reset token was already used', async () => {
+      mockPrisma.passwordResetToken.findUnique.mockResolvedValue({
+        ...mockResetRecord,
+        usedAt: new Date(Date.now() - 1000),
+      });
+
+      await expect(authService.resetPassword(validResetDto)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockPasswordService.hash).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws UnauthorizedException if reset token is expired', async () => {
+      mockPrisma.passwordResetToken.findUnique.mockResolvedValue({
+        ...mockResetRecord,
+        expiresAt: new Date(Date.now() - 1000),
+      });
+
+      await expect(authService.resetPassword(validResetDto)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockPasswordService.hash).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException if new password violates policy', async () => {
+      mockPasswordService.validatePolicy.mockReturnValue({
+        isValid: false,
+        errors: ['Password must be at least 8 characters long.'],
+      });
+
+      await expect(
+        authService.resetPassword({
+          token: 'valid-reset-token-raw',
+          newPassword: 'short',
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPasswordService.hash).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws UnauthorizedException if concurrent attempt already consumed the token (updateMany count !== 1)', async () => {
+      mockPrisma.passwordResetToken.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(authService.resetPassword(validResetDto)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+    });
+
+    it('rolls back entire transaction if any update fails', async () => {
+      mockPrisma.refreshToken.updateMany.mockRejectedValue(
+        new Error('Database lock timeout'),
+      );
+
+      await expect(authService.resetPassword(validResetDto)).rejects.toThrow(
+        'Database lock timeout',
+      );
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
     });
   });
 });

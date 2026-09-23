@@ -130,4 +130,42 @@ export class TokenService {
   getRefreshTokenExpiresAt(): Date {
     return new Date(Date.now() + this.getRefreshTokenExpiresInMs());
   }
+
+  /**
+   * Generates a cryptographically secure, random 64-character hex password reset token.
+   * Uses Node's crypto.randomBytes.
+   */
+  generatePasswordResetToken(): string {
+    return crypto.randomBytes(32).toString('hex');
+  }
+
+  /**
+   * Hashes a raw password reset token using SHA-256 before database storage.
+   */
+  hashPasswordResetToken(rawToken: string): string {
+    return crypto.createHash('sha256').update(rawToken).digest('hex');
+  }
+
+  /**
+   * Returns configured password reset token expiration string (default: 30m).
+   */
+  getPasswordResetExpiresIn(): string {
+    return process.env.PASSWORD_RESET_EXPIRES_IN || '30m';
+  }
+
+  /**
+   * Returns the password reset token expiration duration in milliseconds based on
+   * PASSWORD_RESET_EXPIRES_IN (default: 30m).
+   */
+  getPasswordResetExpiresInMs(): number {
+    return this.parseDurationToMs(this.getPasswordResetExpiresIn());
+  }
+
+  /**
+   * Returns the calculated expiration Date for a newly issued password reset token
+   * based on PASSWORD_RESET_EXPIRES_IN (default: 30m).
+   */
+  getPasswordResetExpiresAt(): Date {
+    return new Date(Date.now() + this.getPasswordResetExpiresInMs());
+  }
 }

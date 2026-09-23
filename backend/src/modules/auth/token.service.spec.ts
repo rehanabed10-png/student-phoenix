@@ -195,4 +195,60 @@ describe('TokenService', () => {
       );
     });
   });
+
+  describe('Password Reset Token Generation and Hashing', () => {
+    it('14. Generates a random 64-character hex reset token', () => {
+      const token = tokenService.generatePasswordResetToken();
+      expect(token).toBeDefined();
+      expect(typeof token).toBe('string');
+      expect(token).toHaveLength(64);
+      expect(/^[0-9a-f]{64}$/.test(token)).toBe(true);
+    });
+
+    it('15. Two generated reset tokens are different', () => {
+      const token1 = tokenService.generatePasswordResetToken();
+      const token2 = tokenService.generatePasswordResetToken();
+      expect(token1).not.toBe(token2);
+    });
+
+    it('16. Password reset token hashing is deterministic SHA-256', () => {
+      const token = tokenService.generatePasswordResetToken();
+      const hash1 = tokenService.hashPasswordResetToken(token);
+      const hash2 = tokenService.hashPasswordResetToken(token);
+      expect(hash1).toBe(hash2);
+      expect(hash1).toHaveLength(64);
+      expect(token).not.toBe(hash1);
+    });
+  });
+
+  describe('Password Reset Token Expiration Calculation', () => {
+    it('17. Calculates default 30m expiration correctly', () => {
+      delete process.env.PASSWORD_RESET_EXPIRES_IN;
+      expect(tokenService.getPasswordResetExpiresIn()).toBe('30m');
+      expect(tokenService.getPasswordResetExpiresInMs()).toBe(30 * 60 * 1000);
+
+      const before = Date.now();
+      const expiresAt = tokenService.getPasswordResetExpiresAt();
+      const after = Date.now();
+
+      expect(expiresAt.getTime()).toBeGreaterThanOrEqual(
+        before + 30 * 60 * 1000,
+      );
+      expect(expiresAt.getTime()).toBeLessThanOrEqual(after + 30 * 60 * 1000);
+    });
+
+    it('18. Calculates configured expiration such as 1h correctly', () => {
+      process.env.PASSWORD_RESET_EXPIRES_IN = '1h';
+      expect(tokenService.getPasswordResetExpiresInMs()).toBe(60 * 60 * 1000);
+
+      const before = Date.now();
+      const expiresAt = tokenService.getPasswordResetExpiresAt();
+      const after = Date.now();
+
+      expect(expiresAt.getTime()).toBeGreaterThanOrEqual(
+        before + 60 * 60 * 1000,
+      );
+      expect(expiresAt.getTime()).toBeLessThanOrEqual(after + 60 * 60 * 1000);
+    });
+  });
 });
