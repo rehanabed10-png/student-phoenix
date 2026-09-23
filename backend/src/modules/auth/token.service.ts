@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as crypto from 'node:crypto';
+import { parseDurationToMs } from './utils/cookies.util.js';
 
 export interface AccessTokenPayload {
   sub: string;
@@ -104,5 +105,29 @@ export class TokenService {
    */
   getRefreshTokenExpiresIn(): string {
     return process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+  }
+
+  /**
+   * Parses duration strings (e.g. '7d', '15d', '30d', '24h', '30m', '60s') into milliseconds.
+   * Defaults to 7 days if undefined or unparseable.
+   */
+  parseDurationToMs(duration?: string): number {
+    return parseDurationToMs(duration);
+  }
+
+  /**
+   * Returns the refresh token expiration duration in milliseconds based on
+   * JWT_REFRESH_EXPIRES_IN (default: 7d).
+   */
+  getRefreshTokenExpiresInMs(): number {
+    return this.parseDurationToMs(this.getRefreshTokenExpiresIn());
+  }
+
+  /**
+   * Returns the calculated expiration Date for a newly issued refresh token
+   * based on JWT_REFRESH_EXPIRES_IN (default: 7d).
+   */
+  getRefreshTokenExpiresAt(): Date {
+    return new Date(Date.now() + this.getRefreshTokenExpiresInMs());
   }
 }

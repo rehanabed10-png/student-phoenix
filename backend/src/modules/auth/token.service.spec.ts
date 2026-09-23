@@ -144,4 +144,55 @@ describe('TokenService', () => {
       expect(isMatch).toBe(false);
     });
   });
+
+  describe('Refresh Token Expiration Calculation', () => {
+    it('11. Calculates default 7d expiration correctly', () => {
+      delete process.env.JWT_REFRESH_EXPIRES_IN;
+      expect(tokenService.getRefreshTokenExpiresIn()).toBe('7d');
+      expect(tokenService.getRefreshTokenExpiresInMs()).toBe(
+        7 * 24 * 60 * 60 * 1000,
+      );
+
+      const before = Date.now();
+      const expiresAt = tokenService.getRefreshTokenExpiresAt();
+      const after = Date.now();
+
+      expect(expiresAt.getTime()).toBeGreaterThanOrEqual(
+        before + 7 * 24 * 60 * 60 * 1000,
+      );
+      expect(expiresAt.getTime()).toBeLessThanOrEqual(
+        after + 7 * 24 * 60 * 60 * 1000,
+      );
+    });
+
+    it('12. Calculates configured duration such as 30d correctly', () => {
+      process.env.JWT_REFRESH_EXPIRES_IN = '30d';
+      expect(tokenService.getRefreshTokenExpiresInMs()).toBe(
+        30 * 24 * 60 * 60 * 1000,
+      );
+
+      const before = Date.now();
+      const expiresAt = tokenService.getRefreshTokenExpiresAt();
+      const after = Date.now();
+
+      expect(expiresAt.getTime()).toBeGreaterThanOrEqual(
+        before + 30 * 24 * 60 * 60 * 1000,
+      );
+      expect(expiresAt.getTime()).toBeLessThanOrEqual(
+        after + 30 * 24 * 60 * 60 * 1000,
+      );
+    });
+
+    it('13. Supports 24h and 30m durations correctly', () => {
+      process.env.JWT_REFRESH_EXPIRES_IN = '24h';
+      expect(tokenService.getRefreshTokenExpiresInMs()).toBe(
+        24 * 60 * 60 * 1000,
+      );
+
+      process.env.JWT_REFRESH_EXPIRES_IN = '30m';
+      expect(tokenService.getRefreshTokenExpiresInMs()).toBe(
+        30 * 60 * 1000,
+      );
+    });
+  });
 });
