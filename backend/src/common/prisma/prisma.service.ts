@@ -1,16 +1,21 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
 
 /**
  * PrismaService provides the central database client interface for Student Phoenix.
- *
- * NOTE (Phase 1.5 Architecture Lock):
- * This service is prepared for Phase 2 (Authentication & Users), where PostgreSQL
- * models and Prisma migrations will be introduced. It will extend PrismaClient
- * once initial schema models are generated.
+ * Extends PrismaClient and manages database lifecycle connections.
  */
 @Injectable()
-export class PrismaService implements OnModuleDestroy {
+export class PrismaService
+  extends PrismaClient
+  implements OnModuleInit, OnModuleDestroy
+{
+  async onModuleInit() {
+    await this.$connect();
+  }
+
   async onModuleDestroy() {
-    // Graceful disconnect will be active once models and client are generated in Phase 2
+    await this.$disconnect();
   }
 }
+
