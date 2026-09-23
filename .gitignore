@@ -42,3 +42,6 @@ Thumbs.db
 # Coverage / Testing
 coverage/
 .nyc_output/
+# AI agent tooling
+.agents/
+skills-lock.json

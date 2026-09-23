@@ -1,11 +1,12 @@
 // ==========================================
 // Student Phoenix — Prisma Schema
-// Phase 1.5 — Architecture Lock: Database Preparation
+// Phase 1.5 — Architecture Lock: Database Preparation (Supabase PostgreSQL)
 // ==========================================
 //
 // NOTE:
 // - Provider is PostgreSQL.
-// - Database connection URL is loaded from DATABASE_URL in environment.
+// - Database connection URL is loaded from DATABASE_URL (transaction pooler).
+// - Direct connection URL is loaded from DIRECT_URL (session pooler for migrations).
 // - Entities (Users, Roles, Sessions, etc.) will be defined strictly
 //   phase-by-phase starting with Authentication & Users (Phase 2).
 // - No speculative models or premature migrations are included here.
@@ -15,6 +16,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
