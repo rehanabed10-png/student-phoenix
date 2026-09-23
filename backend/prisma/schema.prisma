@@ -1,0 +1,20 @@
+// ==========================================
+// Student Phoenix — Prisma Schema
+// Phase 1.5 — Architecture Lock: Database Preparation
+// ==========================================
+//
+// NOTE:
+// - Provider is PostgreSQL.
+// - Database connection URL is loaded from DATABASE_URL in environment.
+// - Entities (Users, Roles, Sessions, etc.) will be defined strictly
+//   phase-by-phase starting with Authentication & Users (Phase 2).
+// - No speculative models or premature migrations are included here.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

@@ -70,14 +70,26 @@ architecture, understanding, testing and final decisions.
 
 ## 8. Current Stage
 
-Phase 1 — Architecture & Technology Setup
+Phase 1.5 — Architecture Lock
 
 ## 9. Current Goal
 
-Create a clean full-stack foundation that can be developed,
-tested and understood by the Phoenix team.
+Establish scalable, modular frontend and backend architectural blueprints
+and prepare database configurations before introducing feature code.
 
-## 10. Important Rule
+## 10. Architectural Principles & Decisions (Phase 1.5 Lock)
+
+### Core Rules (Non-Negotiable)
+- **Frontend**: React + Vite + TypeScript. Layered architecture: `components/`, `layouts/`, `pages/`, `features/`, `hooks/`, `services/`, `lib/`, `types/`.
+- **Backend**: NestJS + TypeScript. Domain-driven modules under `src/modules/` and cross-cutting concerns under `src/common/`.
+- **Database**: PostgreSQL with Prisma ORM. Schema migrations and models to be introduced strictly phase-by-phase.
+- **API Style**: REST API as the primary backend protocol.
+- **Real-Time**: Socket.IO isolated strictly to real-time features (lab monitoring, live session alerts).
+- **Security & Auth (Upcoming)**: Stateless JWT access tokens + persistent refresh tokens with Role-Based Access Control (RBAC).
+- **Separation of Concerns**: Controllers handle transport only; business logic resides strictly in domain services.
+- **Configuration & Secrets**: Centralized environment-driven configuration; no secrets in source code.
+
+## 11. Important Rule
 
 Do not build the entire platform at once.
 
