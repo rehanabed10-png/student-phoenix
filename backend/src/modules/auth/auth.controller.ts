@@ -25,6 +25,13 @@ interface AuthenticatedRequest extends Request {
   user: AuthenticatedUser;
 }
 
+function extractRequestContext(req: Request) {
+  return {
+    ipAddress: req.ip,
+    userAgent: req.headers ? req.headers['user-agent'] : undefined,
+  };
+}
+
 @Controller('api/auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
@@ -36,10 +43,11 @@ export class AuthController {
   @Post('register')
   async register(
     @Body() dto: RegisterDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthResponseDto> {
     const { authResponse, rawRefreshToken } =
-      await this.authService.register(dto);
+      await this.authService.register(dto, extractRequestContext(req));
     this.authService.setRefreshTokenCookie(res, rawRefreshToken);
     return authResponse;
   }
@@ -52,10 +60,11 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async login(
     @Body() dto: LoginDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthResponseDto> {
     const { authResponse, rawRefreshToken } =
-      await this.authService.login(dto);
+      await this.authService.login(dto, extractRequestContext(req));
     this.authService.setRefreshTokenCookie(res, rawRefreshToken);
     return authResponse;
   }
@@ -79,7 +88,10 @@ export class AuthController {
 
     try {
       const { authResponse, rawRefreshToken: newRefreshToken } =
-        await this.authService.refresh(rawRefreshToken);
+        await this.authService.refresh(
+          rawRefreshToken,
+          extractRequestContext(req),
+        );
       this.authService.setRefreshTokenCookie(res, newRefreshToken);
       return authResponse;
     } catch (error) {
@@ -100,7 +112,10 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ message: string }> {
     const rawRefreshToken = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
-    await this.authService.logout(rawRefreshToken);
+    await this.authService.logout(
+      rawRefreshToken,
+      extractRequestContext(req),
+    );
     this.authService.clearRefreshTokenCookie(res);
     return { message: 'Logged out successfully.' };
   }
@@ -118,7 +133,11 @@ export class AuthController {
     @Req() req: AuthenticatedRequest,
     @Body() dto: ChangePasswordDto,
   ): Promise<{ message: string }> {
-    return this.authService.changePassword(req.user.id, dto);
+    return this.authService.changePassword(
+      req.user.id,
+      dto,
+      extractRequestContext(req),
+    );
   }
 
   /**
@@ -130,8 +149,12 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async forgotPassword(
     @Body() dto: ForgotPasswordDto,
+    @Req() req: Request,
   ): Promise<{ message: string }> {
-    return this.authService.requestPasswordReset(dto);
+    return this.authService.requestPasswordReset(
+      dto,
+      extractRequestContext(req),
+    );
   }
 
   /**
@@ -143,8 +166,12 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async resetPassword(
     @Body() dto: ResetPasswordDto,
+    @Req() req: Request,
   ): Promise<{ message: string }> {
-    return this.authService.resetPassword(dto);
+    return this.authService.resetPassword(
+      dto,
+      extractRequestContext(req),
+    );
   }
 }
 

@@ -19,6 +19,18 @@ enum RoleName {
   ADMIN
 }
 
+enum AuditEventType {
+  REGISTER
+  LOGIN_SUCCESS
+  LOGIN_FAILURE
+  REFRESH
+  LOGOUT
+  PASSWORD_CHANGE
+  PASSWORD_RESET_REQUEST
+  PASSWORD_RESET
+  REFRESH_REUSE_DETECTED
+}
+
 model Role {
   id          String   @id @default(uuid())
   name        RoleName @unique
@@ -40,6 +52,7 @@ model User {
   role                Role                 @relation(fields: [roleId], references: [id], onDelete: Restrict)
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
+  auditLogs           AuditLog[]
   createdAt           DateTime             @default(now()) @map("created_at")
   updatedAt           DateTime             @updatedAt @map("updated_at")
 
@@ -73,4 +86,22 @@ model PasswordResetToken {
 
   @@index([userId])
   @@map("password_reset_tokens")
+}
+
+model AuditLog {
+  id        String         @id @default(uuid())
+  eventType AuditEventType @map("event_type")
+  userId    String?        @map("user_id")
+  email     String?
+  ipAddress String?        @map("ip_address")
+  userAgent String?        @map("user_agent")
+  metadata  Json?
+  createdAt DateTime       @default(now()) @map("created_at")
+
+  user      User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("audit_logs")
 }

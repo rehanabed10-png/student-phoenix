@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { PrismaModule } from '../../common/prisma/prisma.module.js';
 import { UsersModule } from '../users/users.module.js';
+import { AuditModule } from '../audit/audit.module.js';
 import { PasswordService } from './password.service.js';
 import { TokenService } from './token.service.js';
 import { JwtStrategy } from './jwt.strategy.js';
@@ -17,6 +18,7 @@ import { AuthController } from './auth.controller.js';
     JwtModule.register({}),
     PrismaModule,
     UsersModule,
+    AuditModule,
   ],
   controllers: [AuthController],
   providers: [

@@ -4,12 +4,13 @@ import {
   ConflictException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { RoleName } from '@prisma/client';
+import { AuditEventType, RoleName } from '@prisma/client';
 import { AuthService } from './auth.service.js';
 import type { PrismaService } from '../../common/prisma/prisma.service.js';
 import type { UsersService, UserWithRole } from '../users/users.service.js';
 import type { PasswordService } from './password.service.js';
 import type { TokenService } from './token.service.js';
+import type { AuditService } from '../audit/audit.service.js';
 
 describe('AuthService', () => {
   let authService: AuthService;
@@ -17,6 +18,7 @@ describe('AuthService', () => {
   let mockUsersService: any;
   let mockPasswordService: any;
   let mockTokenService: any;
+  let mockAuditService: any;
 
   const mockUser: UserWithRole = {
     id: 'user-uuid-1',
@@ -111,11 +113,16 @@ describe('AuthService', () => {
         .mockReturnValue(new Date('2026-10-01T00:30:00Z')),
     };
 
+    mockAuditService = {
+      log: vi.fn().mockResolvedValue(undefined),
+    };
+
     authService = new AuthService(
       mockPrisma as unknown as PrismaService,
       mockUsersService as unknown as UsersService,
       mockPasswordService as unknown as PasswordService,
       mockTokenService as unknown as TokenService,
+      mockAuditService as unknown as AuditService,
     );
   });
 
@@ -877,6 +884,301 @@ describe('AuthService', () => {
         'Database lock timeout',
       );
       expect(mockPrisma.$transaction).toHaveBeenCalled();
+    });
+  });
+
+  describe('Authentication Audit Logging', () => {
+    const context = {
+      ipAddress: '192.168.1.100',
+      userAgent: 'PhoenixClient/1.0',
+    };
+
+    it('records REGISTER event with user details and request context', async () => {
+      await authService.register(
+        {
+          email: 'student@phoenix.edu',
+          password: 'StrongPassword123!',
+          firstName: 'John',
+          lastName: 'Phoenix',
+        },
+        context,
+      );
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.REGISTER,
+        expect.objectContaining({
+          userId: mockUser.id,
+          email: mockUser.email,
+          ipAddress: '192.168.1.100',
+          userAgent: 'PhoenixClient/1.0',
+        }),
+      );
+    });
+
+    it('records LOGIN_SUCCESS event upon valid authentication', async () => {
+      await authService.login(
+        {
+          email: 'student@phoenix.edu',
+          password: 'StrongPassword123!',
+        },
+        context,
+      );
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.LOGIN_SUCCESS,
+        expect.objectContaining({
+          userId: mockUser.id,
+          email: mockUser.email,
+          ipAddress: '192.168.1.100',
+          userAgent: 'PhoenixClient/1.0',
+        }),
+      );
+    });
+
+    it('records LOGIN_FAILURE event when email is unknown without leaking account absence', async () => {
+      mockUsersService.findByEmail.mockResolvedValue(null);
+
+      await expect(
+        authService.login(
+          {
+            email: 'unknown@phoenix.edu',
+            password: 'AnyPassword123!',
+          },
+          context,
+        ),
+      ).rejects.toThrow('Invalid email or password.');
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.LOGIN_FAILURE,
+        expect.objectContaining({
+          email: 'unknown@phoenix.edu',
+          metadata: { reason: 'invalid_credentials' },
+        }),
+      );
+    });
+
+    it('records LOGIN_FAILURE event when password is invalid', async () => {
+      mockPasswordService.verify.mockResolvedValue(false);
+
+      await expect(
+        authService.login(
+          {
+            email: 'student@phoenix.edu',
+            password: 'WrongPassword123!',
+          },
+          context,
+        ),
+      ).rejects.toThrow('Invalid email or password.');
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.LOGIN_FAILURE,
+        expect.objectContaining({
+          userId: mockUser.id,
+          email: mockUser.email,
+          metadata: { reason: 'invalid_credentials' },
+        }),
+      );
+    });
+
+    it('records REFRESH event upon successful token rotation', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue({
+        id: 'token-uuid-1',
+        tokenHash: 'sha256-hashed-refresh-token',
+        userId: mockUser.id,
+        user: mockUser,
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 10000),
+      });
+
+      await authService.refresh('raw-refresh-token-64chars', context);
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.REFRESH,
+        expect.objectContaining({
+          userId: mockUser.id,
+          ipAddress: '192.168.1.100',
+          userAgent: 'PhoenixClient/1.0',
+        }),
+      );
+    });
+
+    it('records REFRESH_REUSE_DETECTED when rotated token is reused', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue({
+        id: 'token-uuid-1',
+        tokenHash: 'sha256-hashed-refresh-token',
+        userId: mockUser.id,
+        user: mockUser,
+        revokedAt: new Date(),
+        replacedByTokenId: 'token-uuid-2',
+        expiresAt: new Date(Date.now() + 10000),
+      });
+
+      await expect(
+        authService.refresh('raw-refresh-token-64chars', context),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.REFRESH_REUSE_DETECTED,
+        expect.objectContaining({
+          userId: mockUser.id,
+          metadata: { reason: 'revoked_refresh_token' },
+        }),
+      );
+    });
+
+    it('records LOGOUT event when active session is revoked', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue({
+        id: 'token-uuid-1',
+        tokenHash: 'sha256-hashed-refresh-token',
+        userId: mockUser.id,
+        revokedAt: null,
+      });
+
+      await authService.logout('raw-refresh-token-64chars', context);
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.LOGOUT,
+        expect.objectContaining({
+          userId: mockUser.id,
+          ipAddress: '192.168.1.100',
+          userAgent: 'PhoenixClient/1.0',
+        }),
+      );
+    });
+
+    it('does NOT record LOGOUT event for already revoked token', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue({
+        id: 'token-uuid-1',
+        tokenHash: 'sha256-hashed-refresh-token',
+        userId: mockUser.id,
+        revokedAt: new Date(),
+      });
+
+      await authService.logout('raw-refresh-token-64chars', context);
+
+      expect(mockAuditService.log).not.toHaveBeenCalled();
+    });
+
+    it('records PASSWORD_CHANGE event upon successful password change', async () => {
+      await authService.changePassword(
+        mockUser.id,
+        {
+          currentPassword: 'CurrentPassword123!',
+          newPassword: 'NewSecurePassword456@',
+        },
+        context,
+      );
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.PASSWORD_CHANGE,
+        expect.objectContaining({
+          userId: mockUser.id,
+          email: mockUser.email,
+        }),
+      );
+    });
+
+    it('records PASSWORD_RESET_REQUEST event for existing user', async () => {
+      await authService.requestPasswordReset(
+        { email: 'student@phoenix.edu' },
+        context,
+      );
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.PASSWORD_RESET_REQUEST,
+        expect.objectContaining({
+          userId: mockUser.id,
+          email: mockUser.email,
+        }),
+      );
+    });
+
+    it('does NOT record PASSWORD_RESET_REQUEST for nonexistent email', async () => {
+      mockUsersService.findByEmail.mockResolvedValue(null);
+
+      await authService.requestPasswordReset(
+        { email: 'nonexistent@phoenix.edu' },
+        context,
+      );
+
+      expect(mockAuditService.log).not.toHaveBeenCalled();
+    });
+
+    it('records PASSWORD_RESET event upon successful password reset', async () => {
+      mockPrisma.passwordResetToken.findUnique.mockResolvedValue({
+        id: 'reset-token-uuid-1',
+        tokenHash: 'hashed-valid-reset-token-raw',
+        userId: mockUser.id,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+        usedAt: null,
+        user: mockUser,
+      });
+
+      await authService.resetPassword(
+        {
+          token: 'valid-reset-token-raw',
+          newPassword: 'BrandNewSecurePassword123!',
+        },
+        context,
+      );
+
+      expect(mockAuditService.log).toHaveBeenCalledWith(
+        AuditEventType.PASSWORD_RESET,
+        expect.objectContaining({
+          userId: mockUser.id,
+          email: mockUser.email,
+        }),
+      );
+    });
+
+    it('does not pass sensitive credentials or raw tokens to AuditService', async () => {
+      await authService.register(
+        {
+          email: 'student@phoenix.edu',
+          password: 'SecretPlaintextPassword123!',
+          firstName: 'John',
+          lastName: 'Phoenix',
+        },
+        context,
+      );
+
+      const calls = mockAuditService.log.mock.calls;
+      for (const call of calls) {
+        const payload = JSON.stringify(call);
+        expect(payload).not.toContain('SecretPlaintextPassword123!');
+        expect(payload).not.toContain('argon2id');
+        expect(payload).not.toContain('raw-refresh-token');
+      }
+    });
+
+    it('ensures audit persistence failures do NOT break authentication', async () => {
+      mockAuditService.log.mockRejectedValue(
+        new Error('Audit DB table locked or unavailable'),
+      );
+
+      // Registration still succeeds
+      await expect(
+        authService.register(
+          {
+            email: 'student@phoenix.edu',
+            password: 'StrongPassword123!',
+            firstName: 'John',
+            lastName: 'Phoenix',
+          },
+          context,
+        ),
+      ).resolves.toBeDefined();
+
+      // Login still succeeds
+      await expect(
+        authService.login(
+          {
+            email: 'student@phoenix.edu',
+            password: 'StrongPassword123!',
+          },
+          context,
+        ),
+      ).resolves.toBeDefined();
     });
   });
 });

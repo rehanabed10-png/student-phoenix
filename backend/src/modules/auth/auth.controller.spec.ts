@@ -53,7 +53,11 @@ describe('AuthController', () => {
   });
 
   describe('register', () => {
-    it('register route invokes AuthService.register, sets cookie, and returns authResponse', async () => {
+    it('register route invokes AuthService.register with request context, sets cookie, and returns authResponse', async () => {
+      const mockReq: any = {
+        ip: '127.0.0.1',
+        headers: { 'user-agent': 'VitestClient' },
+      };
       const mockRes: any = {};
       const dto = {
         email: 'student@phoenix.edu',
@@ -62,9 +66,12 @@ describe('AuthController', () => {
         lastName: 'Phoenix',
       };
 
-      const result = await controller.register(dto, mockRes);
+      const result = await controller.register(dto, mockReq, mockRes);
 
-      expect(mockAuthService.register).toHaveBeenCalledWith(dto);
+      expect(mockAuthService.register).toHaveBeenCalledWith(dto, {
+        ipAddress: '127.0.0.1',
+        userAgent: 'VitestClient',
+      });
       expect(mockAuthService.setRefreshTokenCookie).toHaveBeenCalledWith(
         mockRes,
         'raw-refresh-token',
@@ -74,16 +81,23 @@ describe('AuthController', () => {
   });
 
   describe('login', () => {
-    it('login route invokes AuthService.login, sets cookie, and returns authResponse', async () => {
+    it('login route invokes AuthService.login with request context, sets cookie, and returns authResponse', async () => {
+      const mockReq: any = {
+        ip: '127.0.0.1',
+        headers: { 'user-agent': 'VitestClient' },
+      };
       const mockRes: any = {};
       const dto = {
         email: 'student@phoenix.edu',
         password: 'StrongPassword123!',
       };
 
-      const result = await controller.login(dto, mockRes);
+      const result = await controller.login(dto, mockReq, mockRes);
 
-      expect(mockAuthService.login).toHaveBeenCalledWith(dto);
+      expect(mockAuthService.login).toHaveBeenCalledWith(dto, {
+        ipAddress: '127.0.0.1',
+        userAgent: 'VitestClient',
+      });
       expect(mockAuthService.setRefreshTokenCookie).toHaveBeenCalledWith(
         mockRes,
         'raw-refresh-token',
@@ -95,6 +109,8 @@ describe('AuthController', () => {
   describe('refresh', () => {
     it('reads cookie, rotates token, sets replacement cookie, and returns authResponse', async () => {
       const mockReq: any = {
+        ip: '127.0.0.1',
+        headers: { 'user-agent': 'VitestClient' },
         cookies: {
           phoenix_refresh_token: 'existing-cookie-token',
         },
@@ -105,6 +121,10 @@ describe('AuthController', () => {
 
       expect(mockAuthService.refresh).toHaveBeenCalledWith(
         'existing-cookie-token',
+        {
+          ipAddress: '127.0.0.1',
+          userAgent: 'VitestClient',
+        },
       );
       expect(mockAuthService.setRefreshTokenCookie).toHaveBeenCalledWith(
         mockRes,
@@ -149,8 +169,10 @@ describe('AuthController', () => {
   });
 
   describe('logout', () => {
-    it('calls AuthService.logout, clears cookie, and returns success message', async () => {
+    it('calls AuthService.logout with context, clears cookie, and returns success message', async () => {
       const mockReq: any = {
+        ip: '127.0.0.1',
+        headers: { 'user-agent': 'VitestClient' },
         cookies: {
           phoenix_refresh_token: 'session-cookie-token',
         },
@@ -161,6 +183,10 @@ describe('AuthController', () => {
 
       expect(mockAuthService.logout).toHaveBeenCalledWith(
         'session-cookie-token',
+        {
+          ipAddress: '127.0.0.1',
+          userAgent: 'VitestClient',
+        },
       );
       expect(mockAuthService.clearRefreshTokenCookie).toHaveBeenCalledWith(
         mockRes,
@@ -181,6 +207,8 @@ describe('AuthController', () => {
 
     it('delegates request.user.id and body dto to AuthService.changePassword and returns message', async () => {
       const mockReq: any = {
+        ip: '127.0.0.1',
+        headers: { 'user-agent': 'VitestClient' },
         user: {
           id: 'user-uuid-1',
           email: 'student@phoenix.edu',
@@ -197,6 +225,10 @@ describe('AuthController', () => {
       expect(mockAuthService.changePassword).toHaveBeenCalledWith(
         'user-uuid-1',
         dto,
+        {
+          ipAddress: '127.0.0.1',
+          userAgent: 'VitestClient',
+        },
       );
       expect(result).toEqual({ message: 'Password changed successfully.' });
     });
@@ -211,11 +243,21 @@ describe('AuthController', () => {
       expect(guards).toBeUndefined();
     });
 
-    it('delegates dto to AuthService.requestPasswordReset and returns generic response', async () => {
+    it('delegates dto to AuthService.requestPasswordReset with context and returns generic response', async () => {
+      const mockReq: any = {
+        ip: '127.0.0.1',
+        headers: { 'user-agent': 'VitestClient' },
+      };
       const dto = { email: 'student@phoenix.edu' };
-      const result = await controller.forgotPassword(dto);
+      const result = await controller.forgotPassword(dto, mockReq);
 
-      expect(mockAuthService.requestPasswordReset).toHaveBeenCalledWith(dto);
+      expect(mockAuthService.requestPasswordReset).toHaveBeenCalledWith(
+        dto,
+        {
+          ipAddress: '127.0.0.1',
+          userAgent: 'VitestClient',
+        },
+      );
       expect(result).toEqual({
         message:
           'If an account exists for this email, a password reset link has been requested.',
@@ -232,14 +274,24 @@ describe('AuthController', () => {
       expect(guards).toBeUndefined();
     });
 
-    it('delegates dto to AuthService.resetPassword and returns success message', async () => {
+    it('delegates dto to AuthService.resetPassword with context and returns success message', async () => {
+      const mockReq: any = {
+        ip: '127.0.0.1',
+        headers: { 'user-agent': 'VitestClient' },
+      };
       const dto = {
         token: 'raw-reset-token-64chars',
         newPassword: 'BrandNewSecurePassword123!',
       };
-      const result = await controller.resetPassword(dto);
+      const result = await controller.resetPassword(dto, mockReq);
 
-      expect(mockAuthService.resetPassword).toHaveBeenCalledWith(dto);
+      expect(mockAuthService.resetPassword).toHaveBeenCalledWith(
+        dto,
+        {
+          ipAddress: '127.0.0.1',
+          userAgent: 'VitestClient',
+        },
+      );
       expect(result).toEqual({ message: 'Password reset successfully.' });
     });
   });

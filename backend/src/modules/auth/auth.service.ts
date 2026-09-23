@@ -2,10 +2,12 @@ import {
   Injectable,
   BadRequestException,
   UnauthorizedException,
+  Logger,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { PrismaService } from '../../common/prisma/prisma.service.js';
 import { UsersService } from '../users/users.service.js';
+import { AuditService } from '../audit/audit.service.js';
 import { PasswordService } from './password.service.js';
 import { TokenService } from './token.service.js';
 import { RegisterDto } from './dto/register.dto.js';
@@ -14,7 +16,7 @@ import { ChangePasswordDto } from './dto/change-password.dto.js';
 import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
 import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { AuthResponseDto } from './dto/auth-response.dto.js';
-import type { RefreshToken } from '@prisma/client';
+import { AuditEventType, type RefreshToken } from '@prisma/client';
 import {
   REFRESH_TOKEN_COOKIE_NAME,
   getRefreshTokenCookieOptions,
@@ -26,20 +28,53 @@ export interface AuthenticationResult {
   rawRefreshToken: string;
 }
 
+export interface RequestContext {
+  ipAddress?: string;
+  userAgent?: string;
+}
+
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly usersService: UsersService,
     private readonly passwordService: PasswordService,
     private readonly tokenService: TokenService,
+    private readonly auditService: AuditService,
   ) {}
+
+  /**
+   * Helper that records an audit log event safely without failing the calling auth operation.
+   */
+  private async safeAudit(
+    eventType: AuditEventType,
+    data?: {
+      userId?: string;
+      email?: string;
+      ipAddress?: string;
+      userAgent?: string;
+      metadata?: any;
+    },
+  ): Promise<void> {
+    try {
+      await this.auditService.log(eventType, data);
+    } catch (error) {
+      this.logger.error(
+        `Failed to record audit event ${eventType}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 
   /**
    * Registers a new student account, verifies password policy,
    * creates the user with the STUDENT role, and issues tokens.
    */
-  async register(dto: RegisterDto): Promise<AuthenticationResult> {
+  async register(
+    dto: RegisterDto,
+    context?: RequestContext,
+  ): Promise<AuthenticationResult> {
     // Validate password policy
     const policyResult = this.passwordService.validatePolicy(dto.password);
     if (!policyResult.isValid) {
@@ -58,18 +93,36 @@ export class AuthService {
     });
 
     // Generate tokens and persist refresh session
-    return this.createAuthSession(user);
+    const session = await this.createAuthSession(user);
+
+    await this.safeAudit(AuditEventType.REGISTER, {
+      userId: user.id,
+      email: user.email,
+      ipAddress: context?.ipAddress,
+      userAgent: context?.userAgent,
+    });
+
+    return session;
   }
 
   /**
    * Authenticates a user by email and password, issuing access and refresh tokens.
    * Generic error message prevents account enumeration.
    */
-  async login(dto: LoginDto): Promise<AuthenticationResult> {
+  async login(
+    dto: LoginDto,
+    context?: RequestContext,
+  ): Promise<AuthenticationResult> {
     const normalizedEmail = dto.email.toLowerCase().trim();
     const user = await this.usersService.findByEmail(normalizedEmail);
 
     if (!user) {
+      await this.safeAudit(AuditEventType.LOGIN_FAILURE, {
+        email: normalizedEmail,
+        ipAddress: context?.ipAddress,
+        userAgent: context?.userAgent,
+        metadata: { reason: 'invalid_credentials' },
+      });
       throw new UnauthorizedException('Invalid email or password.');
     }
 
@@ -79,10 +132,26 @@ export class AuthService {
     );
 
     if (!isPasswordValid) {
+      await this.safeAudit(AuditEventType.LOGIN_FAILURE, {
+        userId: user.id,
+        email: user.email,
+        ipAddress: context?.ipAddress,
+        userAgent: context?.userAgent,
+        metadata: { reason: 'invalid_credentials' },
+      });
       throw new UnauthorizedException('Invalid email or password.');
     }
 
-    return this.createAuthSession(user);
+    const session = await this.createAuthSession(user);
+
+    await this.safeAudit(AuditEventType.LOGIN_SUCCESS, {
+      userId: user.id,
+      email: user.email,
+      ipAddress: context?.ipAddress,
+      userAgent: context?.userAgent,
+    });
+
+    return session;
   }
 
   /**
@@ -90,7 +159,10 @@ export class AuthService {
    * Performs atomic rotation, revoking the old token and generating a replacement.
    * Detects reuse attempts on previously rotated tokens and revokes the affected token chain.
    */
-  async refresh(rawRefreshToken: string): Promise<AuthenticationResult> {
+  async refresh(
+    rawRefreshToken: string,
+    context?: RequestContext,
+  ): Promise<AuthenticationResult> {
     if (!rawRefreshToken || typeof rawRefreshToken !== 'string') {
       throw new UnauthorizedException('Invalid or expired refresh token.');
     }
@@ -107,6 +179,13 @@ export class AuthService {
 
     // Token reuse detection: if token is already revoked and had a replacement issued
     if (tokenRecord.revokedAt != null) {
+      await this.safeAudit(AuditEventType.REFRESH_REUSE_DETECTED, {
+        userId: tokenRecord.userId,
+        ipAddress: context?.ipAddress,
+        userAgent: context?.userAgent,
+        metadata: { reason: 'revoked_refresh_token' },
+      });
+
       if (tokenRecord.replacedByTokenId != null) {
         // Reuse of rotated token! Revoke the descendant token chain
         await this.prisma.$transaction(async (tx) => {
@@ -164,6 +243,12 @@ export class AuthService {
       }
     });
 
+    await this.safeAudit(AuditEventType.REFRESH, {
+      userId: tokenRecord.user.id,
+      ipAddress: context?.ipAddress,
+      userAgent: context?.userAgent,
+    });
+
     return {
       authResponse: {
         accessToken,
@@ -209,7 +294,10 @@ export class AuthService {
    * Logs out the user by revoking the refresh token session if active.
    * Safe and idempotent: succeeds even if cookie is missing, unknown, or already revoked.
    */
-  async logout(rawRefreshToken?: string): Promise<void> {
+  async logout(
+    rawRefreshToken?: string,
+    context?: RequestContext,
+  ): Promise<void> {
     if (!rawRefreshToken || typeof rawRefreshToken !== 'string') {
       return;
     }
@@ -224,6 +312,12 @@ export class AuthService {
         where: { id: tokenRecord.id },
         data: { revokedAt: new Date() },
       });
+
+      await this.safeAudit(AuditEventType.LOGOUT, {
+        userId: tokenRecord.userId,
+        ipAddress: context?.ipAddress,
+        userAgent: context?.userAgent,
+      });
     }
   }
 
@@ -236,6 +330,7 @@ export class AuthService {
   async changePassword(
     userId: string,
     dto: ChangePasswordDto,
+    context?: RequestContext,
   ): Promise<{ message: string }> {
     const user = await this.usersService.findById(userId);
     if (!user) {
@@ -281,6 +376,13 @@ export class AuthService {
       });
     });
 
+    await this.safeAudit(AuditEventType.PASSWORD_CHANGE, {
+      userId: user.id,
+      email: user.email,
+      ipAddress: context?.ipAddress,
+      userAgent: context?.userAgent,
+    });
+
     return { message: 'Password changed successfully.' };
   }
 
@@ -291,6 +393,7 @@ export class AuthService {
    */
   async requestPasswordReset(
     dto: ForgotPasswordDto,
+    context?: RequestContext,
   ): Promise<{ message: string }> {
     const genericResponse = {
       message:
@@ -329,6 +432,13 @@ export class AuthService {
       });
     });
 
+    await this.safeAudit(AuditEventType.PASSWORD_RESET_REQUEST, {
+      userId: user.id,
+      email: user.email,
+      ipAddress: context?.ipAddress,
+      userAgent: context?.userAgent,
+    });
+
     return genericResponse;
   }
 
@@ -340,6 +450,7 @@ export class AuthService {
    */
   async resetPassword(
     dto: ResetPasswordDto,
+    context?: RequestContext,
   ): Promise<{ message: string }> {
     const tokenHash = this.tokenService.hashPasswordResetToken(dto.token);
 
@@ -413,6 +524,13 @@ export class AuthService {
           revokedAt: new Date(),
         },
       });
+    });
+
+    await this.safeAudit(AuditEventType.PASSWORD_RESET, {
+      userId: resetTokenRecord.userId,
+      email: resetTokenRecord.user.email,
+      ipAddress: context?.ipAddress,
+      userAgent: context?.userAgent,
     });
 
     return { message: 'Password reset successfully.' };
