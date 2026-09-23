@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { UnauthorizedException } from '@nestjs/common';
 import { RoleName } from '@prisma/client';
 import { AuthController } from './auth.controller.js';
+import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import type { AuthService } from './auth.service.js';
 
 describe('AuthController', () => {
@@ -34,6 +35,9 @@ describe('AuthController', () => {
         rawRefreshToken: 'new-rotated-refresh-token',
       }),
       logout: vi.fn().mockResolvedValue(undefined),
+      changePassword: vi
+        .fn()
+        .mockResolvedValue({ message: 'Password changed successfully.' }),
       setRefreshTokenCookie: vi.fn(),
       clearRefreshTokenCookie: vi.fn(),
     };
@@ -155,6 +159,39 @@ describe('AuthController', () => {
         mockRes,
       );
       expect(result).toEqual({ message: 'Logged out successfully.' });
+    });
+  });
+
+  describe('changePassword', () => {
+    it('requires JwtAuthGuard metadata on the route', () => {
+      const guards = Reflect.getMetadata(
+        '__guards__',
+        controller.changePassword,
+      );
+      expect(guards).toBeDefined();
+      expect(guards).toContain(JwtAuthGuard);
+    });
+
+    it('delegates request.user.id and body dto to AuthService.changePassword and returns message', async () => {
+      const mockReq: any = {
+        user: {
+          id: 'user-uuid-1',
+          email: 'student@phoenix.edu',
+          role: RoleName.STUDENT,
+        },
+      };
+      const dto = {
+        currentPassword: 'OldPassword123!',
+        newPassword: 'NewSecurePassword456@',
+      };
+
+      const result = await controller.changePassword(mockReq, dto);
+
+      expect(mockAuthService.changePassword).toHaveBeenCalledWith(
+        'user-uuid-1',
+        dto,
+      );
+      expect(result).toEqual({ message: 'Password changed successfully.' });
     });
   });
 });

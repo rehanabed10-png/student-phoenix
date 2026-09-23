@@ -48,6 +48,9 @@ describe('AuthService', () => {
 
   beforeEach(() => {
     mockPrisma = {
+      user: {
+        update: vi.fn().mockResolvedValue(mockUser),
+      },
       refreshToken: {
         create: vi.fn().mockResolvedValue({ id: 'token-uuid-1' }),
         findUnique: vi.fn(),
@@ -62,6 +65,7 @@ describe('AuthService', () => {
     mockUsersService = {
       createStudentUser: vi.fn().mockResolvedValue(mockUser),
       findByEmail: vi.fn().mockResolvedValue(mockUser),
+      findById: vi.fn().mockResolvedValue(mockUser),
       sanitizeUser: vi.fn().mockReturnValue(sanitizedUser),
     };
 
@@ -541,6 +545,125 @@ describe('AuthService', () => {
           path: '/api/auth',
         }),
       );
+    });
+  });
+
+  describe('changePassword', () => {
+    const validDto = {
+      currentPassword: 'OldPassword123!',
+      newPassword: 'NewSecurePassword456@',
+    };
+
+    it('successfully changes password, updates hash, revokes all refresh tokens, and returns success message', async () => {
+      const result = await authService.changePassword('user-uuid-1', validDto);
+
+      expect(mockUsersService.findById).toHaveBeenCalledWith('user-uuid-1');
+      expect(mockPasswordService.verify).toHaveBeenCalledWith(
+        'OldPassword123!',
+        mockUser.passwordHash,
+      );
+      expect(mockPasswordService.validatePolicy).toHaveBeenCalledWith(
+        'NewSecurePassword456@',
+      );
+      expect(mockPasswordService.hash).toHaveBeenCalledWith(
+        'NewSecurePassword456@',
+      );
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+      expect(mockPrisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-uuid-1' },
+        data: { passwordHash: '$argon2id$hashedpassword' },
+      });
+      expect(mockPrisma.refreshToken.updateMany).toHaveBeenCalledWith({
+        where: {
+          userId: 'user-uuid-1',
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: expect.any(Date),
+        },
+      });
+      expect(result).toEqual({ message: 'Password changed successfully.' });
+      // Verify no sensitive tokens or hashes are returned
+      expect(result).not.toHaveProperty('password');
+      expect(result).not.toHaveProperty('passwordHash');
+      expect(result).not.toHaveProperty('accessToken');
+      expect(result).not.toHaveProperty('refreshToken');
+    });
+
+    it('throws UnauthorizedException if user is not found', async () => {
+      mockUsersService.findById.mockResolvedValue(null);
+
+      await expect(
+        authService.changePassword('non-existent-user', validDto),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockPasswordService.verify).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws UnauthorizedException if current password verification fails', async () => {
+      mockPasswordService.verify.mockResolvedValue(false);
+
+      await expect(
+        authService.changePassword('user-uuid-1', validDto),
+      ).rejects.toThrow(new UnauthorizedException('Current password is incorrect.'));
+
+      expect(mockPasswordService.validatePolicy).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException if new password violates policy', async () => {
+      mockPasswordService.validatePolicy.mockReturnValue({
+        isValid: false,
+        errors: ['Password must be at least 8 characters long.'],
+      });
+
+      await expect(
+        authService.changePassword('user-uuid-1', {
+          currentPassword: 'OldPassword123!',
+          newPassword: 'short',
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPasswordService.hash).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException if new password is identical to current password', async () => {
+      await expect(
+        authService.changePassword('user-uuid-1', {
+          currentPassword: 'SamePassword123!',
+          newPassword: 'SamePassword123!',
+        }),
+      ).rejects.toThrow(
+        new BadRequestException('New password cannot be the same as the current password.'),
+      );
+
+      expect(mockPasswordService.hash).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('ensures user update and refresh token revocation execute inside a transaction and roll back on error', async () => {
+      mockPrisma.refreshToken.updateMany.mockRejectedValue(
+        new Error('Database write failure'),
+      );
+
+      await expect(
+        authService.changePassword('user-uuid-1', validDto),
+      ).rejects.toThrow('Database write failure');
+
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+    });
+
+    it('ensures only passwordHash is updated and other user fields cannot be modified', async () => {
+      await authService.changePassword('user-uuid-1', validDto);
+
+      expect(mockPrisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-uuid-1' },
+        data: { passwordHash: '$argon2id$hashedpassword' },
+      });
+      const updateData = mockPrisma.user.update.mock.calls[0][0].data;
+      expect(Object.keys(updateData)).toEqual(['passwordHash']);
     });
   });
 });

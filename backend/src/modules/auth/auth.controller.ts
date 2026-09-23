@@ -7,13 +7,21 @@ import {
   Req,
   Res,
   UnauthorizedException,
+  UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
+import { ChangePasswordDto } from './dto/change-password.dto.js';
 import { AuthResponseDto } from './dto/auth-response.dto.js';
+import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import type { AuthenticatedUser } from './types/authenticated-user.js';
 import { REFRESH_TOKEN_COOKIE_NAME } from './utils/cookies.util.js';
+
+interface AuthenticatedRequest extends Request {
+  user: AuthenticatedUser;
+}
 
 @Controller('api/auth')
 export class AuthController {
@@ -93,6 +101,22 @@ export class AuthController {
     await this.authService.logout(rawRefreshToken);
     this.authService.clearRefreshTokenCookie(res);
     return { message: 'Logged out successfully.' };
+  }
+
+  /**
+   * POST /api/auth/change-password
+   * Authenticated password change for current user.
+   * Requires a valid access JWT via JwtAuthGuard.
+   * Invalidates all active refresh sessions for this user.
+   */
+  @Post('change-password')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async changePassword(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: ChangePasswordDto,
+  ): Promise<{ message: string }> {
+    return this.authService.changePassword(req.user.id, dto);
   }
 }
 

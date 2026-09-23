@@ -10,6 +10,7 @@ import { PasswordService } from './password.service.js';
 import { TokenService } from './token.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
+import { ChangePasswordDto } from './dto/change-password.dto.js';
 import { AuthResponseDto } from './dto/auth-response.dto.js';
 import type { RefreshToken } from '@prisma/client';
 import {
@@ -222,6 +223,63 @@ export class AuthService {
         data: { revokedAt: new Date() },
       });
     }
+  }
+
+  /**
+   * Authenticated password change.
+   * Verifies current password, enforces password policy, verifies new password differs,
+   * hashes the new password, and atomically updates passwordHash and revokes all active
+   * refresh sessions for the user within a transaction.
+   */
+  async changePassword(
+    userId: string,
+    dto: ChangePasswordDto,
+  ): Promise<{ message: string }> {
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new UnauthorizedException('User not found.');
+    }
+
+    const isCurrentPasswordValid = await this.passwordService.verify(
+      dto.currentPassword,
+      user.passwordHash,
+    );
+
+    if (!isCurrentPasswordValid) {
+      throw new UnauthorizedException('Current password is incorrect.');
+    }
+
+    const policyResult = this.passwordService.validatePolicy(dto.newPassword);
+    if (!policyResult.isValid) {
+      throw new BadRequestException(policyResult.errors.join(' '));
+    }
+
+    if (dto.newPassword === dto.currentPassword) {
+      throw new BadRequestException(
+        'New password cannot be the same as the current password.',
+      );
+    }
+
+    const newPasswordHash = await this.passwordService.hash(dto.newPassword);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: { passwordHash: newPasswordHash },
+      });
+
+      await tx.refreshToken.updateMany({
+        where: {
+          userId,
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: new Date(),
+        },
+      });
+    });
+
+    return { message: 'Password changed successfully.' };
   }
 
   /**
