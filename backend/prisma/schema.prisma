@@ -1,15 +1,7 @@
 // ==========================================
 // Student Phoenix — Prisma Schema
-// Phase 1.5 — Architecture Lock: Database Preparation (Supabase PostgreSQL)
+// Phase 2.2 — User + Role Database Schema
 // ==========================================
-//
-// NOTE:
-// - Provider is PostgreSQL.
-// - Database connection URL is loaded from DATABASE_URL (transaction pooler).
-// - Direct connection URL is loaded from DIRECT_URL (session pooler for migrations).
-// - Entities (Users, Roles, Sessions, etc.) will be defined strictly
-//   phase-by-phase starting with Authentication & Users (Phase 2).
-// - No speculative models or premature migrations are included here.
 
 generator client {
   provider = "prisma-client-js"
@@ -19,4 +11,36 @@ datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
+}
+
+enum RoleName {
+  STUDENT
+  FACULTY
+  ADMIN
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        RoleName @unique
+  description String?
+  users       User[]
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("roles")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  firstName    String   @map("first_name")
+  lastName     String   @map("last_name")
+  roleId       String   @map("role_id")
+  role         Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@index([roleId])
+  @@map("users")
 }
