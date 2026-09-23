@@ -9,6 +9,7 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service.js';
 import { RegisterDto } from './dto/register.dto.js';
@@ -55,8 +56,10 @@ export class AuthController {
   /**
    * POST /api/auth/login
    * Authenticates a user and sets the refresh token cookie.
+   * Throttled to 15 attempts per minute to mitigate brute-force attacks.
    */
   @Post('login')
+  @Throttle({ default: { limit: 15, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
   async login(
     @Body() dto: LoginDto,
@@ -144,8 +147,10 @@ export class AuthController {
    * POST /api/auth/forgot-password
    * Requests a password reset link for the provided email address.
    * Public endpoint. Defends against account enumeration with generic response.
+   * Throttled to 15 attempts per minute to prevent reset-request abuse.
    */
   @Post('forgot-password')
+  @Throttle({ default: { limit: 15, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
   async forgotPassword(
     @Body() dto: ForgotPasswordDto,
@@ -161,8 +166,10 @@ export class AuthController {
    * POST /api/auth/reset-password
    * Resets the user's password using a verified reset token.
    * Public endpoint. The reset token is the credential.
+   * Throttled to 15 attempts per minute to mitigate automated token guessing.
    */
   @Post('reset-password')
+  @Throttle({ default: { limit: 15, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
   async resetPassword(
     @Body() dto: ResetPasswordDto,

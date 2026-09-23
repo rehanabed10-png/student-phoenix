@@ -33,6 +33,10 @@ export interface RequestContext {
   userAgent?: string;
 }
 
+// Constant Argon2id hash for timing side-channel mitigation on nonexistent email lookups
+const DUMMY_ARGON2_HASH =
+  '$argon2id$v=19$m=65536,t=3,p=4$dHVtbXlfc2FsdF9mb3JfdGltaW5n$aHNoQnV0Tm90VmFsaWRQYXNzd29yZA';
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -108,6 +112,7 @@ export class AuthService {
   /**
    * Authenticates a user by email and password, issuing access and refresh tokens.
    * Generic error message prevents account enumeration.
+   * Mitigates timing side-channel attacks by evaluating dummy hash on unknown email lookups.
    */
   async login(
     dto: LoginDto,
@@ -117,6 +122,8 @@ export class AuthService {
     const user = await this.usersService.findByEmail(normalizedEmail);
 
     if (!user) {
+      await this.passwordService.verify(dto.password, DUMMY_ARGON2_HASH);
+
       await this.safeAudit(AuditEventType.LOGIN_FAILURE, {
         email: normalizedEmail,
         ipAddress: context?.ipAddress,
