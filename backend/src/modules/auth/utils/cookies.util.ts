@@ -33,9 +33,6 @@ export function parseDurationToMs(duration?: string): number {
   }
 }
 
-/**
- * Generates secure cookie options for the refresh token.
- */
 export function getRefreshTokenCookieOptions(maxAgeMs: number): CookieOptions {
   return {
     httpOnly: true,
@@ -45,3 +42,17 @@ export function getRefreshTokenCookieOptions(maxAgeMs: number): CookieOptions {
     maxAge: maxAgeMs,
   };
 }
+
+/**
+ * Generates options for clearing the refresh token cookie.
+ * Matches path, secure, httpOnly, and sameSite of the issued cookie.
+ */
+export function getClearRefreshTokenCookieOptions(): CookieOptions {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    path: '/api/auth',
+  };
+}
+

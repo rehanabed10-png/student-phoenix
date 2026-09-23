@@ -11,9 +11,11 @@ import { TokenService } from './token.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { AuthResponseDto } from './dto/auth-response.dto.js';
+import type { RefreshToken } from '@prisma/client';
 import {
   REFRESH_TOKEN_COOKIE_NAME,
   getRefreshTokenCookieOptions,
+  getClearRefreshTokenCookieOptions,
 } from './utils/cookies.util.js';
 
 export interface AuthenticationResult {
@@ -81,6 +83,148 @@ export class AuthService {
   }
 
   /**
+   * Refreshes access and refresh tokens using an existing raw refresh token from HttpOnly cookie.
+   * Performs atomic rotation, revoking the old token and generating a replacement.
+   * Detects reuse attempts on previously rotated tokens and revokes the affected token chain.
+   */
+  async refresh(rawRefreshToken: string): Promise<AuthenticationResult> {
+    if (!rawRefreshToken || typeof rawRefreshToken !== 'string') {
+      throw new UnauthorizedException('Invalid or expired refresh token.');
+    }
+
+    const tokenHash = this.tokenService.hashRefreshToken(rawRefreshToken);
+    const tokenRecord = await this.prisma.refreshToken.findUnique({
+      where: { tokenHash },
+      include: { user: { include: { role: true } } },
+    });
+
+    if (!tokenRecord) {
+      throw new UnauthorizedException('Invalid or expired refresh token.');
+    }
+
+    // Token reuse detection: if token is already revoked and had a replacement issued
+    if (tokenRecord.revokedAt != null) {
+      if (tokenRecord.replacedByTokenId != null) {
+        // Reuse of rotated token! Revoke the descendant token chain
+        await this.prisma.$transaction(async (tx) => {
+          await this.revokeTokenChain(tokenRecord.replacedByTokenId!, tx);
+        });
+      }
+      throw new UnauthorizedException('Invalid or expired refresh token.');
+    }
+
+    // Expired token check
+    if (tokenRecord.expiresAt <= new Date()) {
+      throw new UnauthorizedException('Invalid or expired refresh token.');
+    }
+
+    // User existence check
+    if (!tokenRecord.user) {
+      throw new UnauthorizedException('Invalid or expired refresh token.');
+    }
+
+    // Generate new access token
+    const accessToken = this.tokenService.generateAccessToken({
+      sub: tokenRecord.user.id,
+      email: tokenRecord.user.email,
+      role: tokenRecord.user.role.name,
+    });
+
+    // Generate new refresh token
+    const newRawRefreshToken = this.tokenService.generateRefreshToken();
+    const newTokenHash = this.tokenService.hashRefreshToken(newRawRefreshToken);
+
+    // Atomic rotation in transaction: create new record, revoke old record conditionally, and link replacement
+    await this.prisma.$transaction(async (tx) => {
+      const newRecord = await tx.refreshToken.create({
+        data: {
+          tokenHash: newTokenHash,
+          userId: tokenRecord.user.id,
+          expiresAt: this.tokenService.getRefreshTokenExpiresAt(),
+        },
+      });
+
+      // Conditional state transition: only succeeds if the old token is STILL active
+      const updateResult = await tx.refreshToken.updateMany({
+        where: {
+          id: tokenRecord.id,
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: new Date(),
+          replacedByTokenId: newRecord.id,
+        },
+      });
+
+      if (updateResult.count !== 1) {
+        throw new UnauthorizedException('Invalid or expired refresh token.');
+      }
+    });
+
+    return {
+      authResponse: {
+        accessToken,
+        user: this.usersService.sanitizeUser(tokenRecord.user),
+      },
+      rawRefreshToken: newRawRefreshToken,
+    };
+  }
+
+  /**
+   * Traverses and revokes all active tokens in the descendant chain starting from initialTokenId.
+   */
+  private async revokeTokenChain(
+    initialTokenId: string,
+    tx: any,
+  ): Promise<void> {
+    let currentTokenId: string | null = initialTokenId;
+    const visited = new Set<string>();
+
+    while (currentTokenId && !visited.has(currentTokenId)) {
+      visited.add(currentTokenId);
+      const descendant: RefreshToken | null =
+        await tx.refreshToken.findUnique({
+          where: { id: currentTokenId },
+        });
+
+      if (!descendant) {
+        break;
+      }
+
+      if (!descendant.revokedAt) {
+        await tx.refreshToken.update({
+          where: { id: descendant.id },
+          data: { revokedAt: new Date() },
+        });
+      }
+
+      currentTokenId = descendant.replacedByTokenId;
+    }
+  }
+
+  /**
+   * Logs out the user by revoking the refresh token session if active.
+   * Safe and idempotent: succeeds even if cookie is missing, unknown, or already revoked.
+   */
+  async logout(rawRefreshToken?: string): Promise<void> {
+    if (!rawRefreshToken || typeof rawRefreshToken !== 'string') {
+      return;
+    }
+
+    const tokenHash = this.tokenService.hashRefreshToken(rawRefreshToken);
+    const tokenRecord = await this.prisma.refreshToken.findUnique({
+      where: { tokenHash },
+    });
+
+    if (tokenRecord && !tokenRecord.revokedAt) {
+      await this.prisma.refreshToken.update({
+        where: { id: tokenRecord.id },
+        data: { revokedAt: new Date() },
+      });
+    }
+  }
+
+  /**
    * Sets the HttpOnly refresh token cookie on the outgoing HTTP response.
    */
   setRefreshTokenCookie(res: Response, rawRefreshToken: string): void {
@@ -89,6 +233,16 @@ export class AuthService {
       REFRESH_TOKEN_COOKIE_NAME,
       rawRefreshToken,
       getRefreshTokenCookieOptions(maxAgeMs),
+    );
+  }
+
+  /**
+   * Clears the HttpOnly refresh token cookie on the outgoing HTTP response.
+   */
+  clearRefreshTokenCookie(res: Response): void {
+    res.clearCookie(
+      REFRESH_TOKEN_COOKIE_NAME,
+      getClearRefreshTokenCookieOptions(),
     );
   }
 

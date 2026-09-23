@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   REFRESH_TOKEN_COOKIE_NAME,
   getRefreshTokenCookieOptions,
+  getClearRefreshTokenCookieOptions,
   parseDurationToMs,
 } from './cookies.util.js';
 
@@ -34,6 +35,17 @@ describe('CookiesUtil', () => {
       process.env.NODE_ENV = 'production';
       const prodOptions = getRefreshTokenCookieOptions(604800000);
       expect(prodOptions.secure).toBe(true);
+    });
+
+    it('clear cookie options match security parameters', () => {
+      process.env.NODE_ENV = 'production';
+      const clearOptions = getClearRefreshTokenCookieOptions();
+
+      expect(clearOptions.httpOnly).toBe(true);
+      expect(clearOptions.sameSite).toBe('strict');
+      expect(clearOptions.path).toBe('/api/auth');
+      expect(clearOptions.secure).toBe(true);
+      expect((clearOptions as any).maxAge).toBeUndefined();
     });
   });
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { UnauthorizedException } from '@nestjs/common';
 import { RoleName } from '@prisma/client';
 import { AuthController } from './auth.controller.js';
 import type { AuthService } from './auth.service.js';
@@ -28,45 +29,132 @@ describe('AuthController', () => {
         authResponse: mockAuthResponse,
         rawRefreshToken: 'raw-refresh-token',
       }),
+      refresh: vi.fn().mockResolvedValue({
+        authResponse: mockAuthResponse,
+        rawRefreshToken: 'new-rotated-refresh-token',
+      }),
+      logout: vi.fn().mockResolvedValue(undefined),
       setRefreshTokenCookie: vi.fn(),
+      clearRefreshTokenCookie: vi.fn(),
     };
 
     controller = new AuthController(mockAuthService as unknown as AuthService);
   });
 
-  it('register route invokes AuthService.register, sets cookie, and returns authResponse', async () => {
-    const mockRes: any = {};
-    const dto = {
-      email: 'student@phoenix.edu',
-      password: 'StrongPassword123!',
-      firstName: 'John',
-      lastName: 'Phoenix',
-    };
+  describe('register', () => {
+    it('register route invokes AuthService.register, sets cookie, and returns authResponse', async () => {
+      const mockRes: any = {};
+      const dto = {
+        email: 'student@phoenix.edu',
+        password: 'StrongPassword123!',
+        firstName: 'John',
+        lastName: 'Phoenix',
+      };
 
-    const result = await controller.register(dto, mockRes);
+      const result = await controller.register(dto, mockRes);
 
-    expect(mockAuthService.register).toHaveBeenCalledWith(dto);
-    expect(mockAuthService.setRefreshTokenCookie).toHaveBeenCalledWith(
-      mockRes,
-      'raw-refresh-token',
-    );
-    expect(result).toEqual(mockAuthResponse);
+      expect(mockAuthService.register).toHaveBeenCalledWith(dto);
+      expect(mockAuthService.setRefreshTokenCookie).toHaveBeenCalledWith(
+        mockRes,
+        'raw-refresh-token',
+      );
+      expect(result).toEqual(mockAuthResponse);
+    });
   });
 
-  it('login route invokes AuthService.login, sets cookie, and returns authResponse', async () => {
-    const mockRes: any = {};
-    const dto = {
-      email: 'student@phoenix.edu',
-      password: 'StrongPassword123!',
-    };
+  describe('login', () => {
+    it('login route invokes AuthService.login, sets cookie, and returns authResponse', async () => {
+      const mockRes: any = {};
+      const dto = {
+        email: 'student@phoenix.edu',
+        password: 'StrongPassword123!',
+      };
 
-    const result = await controller.login(dto, mockRes);
+      const result = await controller.login(dto, mockRes);
 
-    expect(mockAuthService.login).toHaveBeenCalledWith(dto);
-    expect(mockAuthService.setRefreshTokenCookie).toHaveBeenCalledWith(
-      mockRes,
-      'raw-refresh-token',
-    );
-    expect(result).toEqual(mockAuthResponse);
+      expect(mockAuthService.login).toHaveBeenCalledWith(dto);
+      expect(mockAuthService.setRefreshTokenCookie).toHaveBeenCalledWith(
+        mockRes,
+        'raw-refresh-token',
+      );
+      expect(result).toEqual(mockAuthResponse);
+    });
+  });
+
+  describe('refresh', () => {
+    it('reads cookie, rotates token, sets replacement cookie, and returns authResponse', async () => {
+      const mockReq: any = {
+        cookies: {
+          phoenix_refresh_token: 'existing-cookie-token',
+        },
+      };
+      const mockRes: any = {};
+
+      const result = await controller.refresh(mockReq, mockRes);
+
+      expect(mockAuthService.refresh).toHaveBeenCalledWith(
+        'existing-cookie-token',
+      );
+      expect(mockAuthService.setRefreshTokenCookie).toHaveBeenCalledWith(
+        mockRes,
+        'new-rotated-refresh-token',
+      );
+      expect(result).toEqual(mockAuthResponse);
+    });
+
+    it('rejects and clears cookie if refresh cookie is missing', async () => {
+      const mockReq: any = {
+        cookies: {},
+      };
+      const mockRes: any = {};
+
+      await expect(controller.refresh(mockReq, mockRes)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockAuthService.clearRefreshTokenCookie).toHaveBeenCalledWith(
+        mockRes,
+      );
+      expect(mockAuthService.refresh).not.toHaveBeenCalled();
+    });
+
+    it('clears cookie and propagates error if AuthService.refresh fails', async () => {
+      const mockReq: any = {
+        cookies: {
+          phoenix_refresh_token: 'invalid-or-reused-token',
+        },
+      };
+      const mockRes: any = {};
+      mockAuthService.refresh.mockRejectedValue(
+        new UnauthorizedException('Invalid or expired refresh token.'),
+      );
+
+      await expect(controller.refresh(mockReq, mockRes)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockAuthService.clearRefreshTokenCookie).toHaveBeenCalledWith(
+        mockRes,
+      );
+    });
+  });
+
+  describe('logout', () => {
+    it('calls AuthService.logout, clears cookie, and returns success message', async () => {
+      const mockReq: any = {
+        cookies: {
+          phoenix_refresh_token: 'session-cookie-token',
+        },
+      };
+      const mockRes: any = {};
+
+      const result = await controller.logout(mockReq, mockRes);
+
+      expect(mockAuthService.logout).toHaveBeenCalledWith(
+        'session-cookie-token',
+      );
+      expect(mockAuthService.clearRefreshTokenCookie).toHaveBeenCalledWith(
+        mockRes,
+      );
+      expect(result).toEqual({ message: 'Logged out successfully.' });
+    });
   });
 });

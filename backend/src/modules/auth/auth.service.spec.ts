@@ -44,11 +44,19 @@ describe('AuthService', () => {
     role: RoleName.STUDENT,
   };
 
+  const mockExpiresAt = new Date('2026-10-01T00:00:00Z');
+
   beforeEach(() => {
     mockPrisma = {
       refreshToken: {
         create: vi.fn().mockResolvedValue({ id: 'token-uuid-1' }),
+        findUnique: vi.fn(),
+        update: vi.fn().mockResolvedValue({ id: 'token-uuid-1' }),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      $transaction: vi
+        .fn()
+        .mockImplementation((callback) => callback(mockPrisma)),
     };
 
     mockUsersService = {
@@ -63,13 +71,23 @@ describe('AuthService', () => {
       verify: vi.fn().mockResolvedValue(true),
     };
 
-    const mockExpiresAt = new Date('2026-10-01T00:00:00Z');
     mockTokenService = {
       generateAccessToken: vi.fn().mockReturnValue('mock-jwt-access-token'),
-      generateRefreshToken: vi.fn().mockReturnValue('raw-refresh-token-64chars'),
-      hashRefreshToken: vi.fn().mockReturnValue('sha256-hashed-refresh-token'),
+      generateRefreshToken: vi
+        .fn()
+        .mockReturnValue('raw-refresh-token-64chars'),
+      hashRefreshToken: vi
+        .fn()
+        .mockImplementation((token: string) => {
+          if (token === 'raw-refresh-token-64chars') {
+            return 'sha256-hashed-refresh-token';
+          }
+          return `hashed-${token}`;
+        }),
       getRefreshTokenExpiresIn: vi.fn().mockReturnValue('7d'),
-      getRefreshTokenExpiresInMs: vi.fn().mockReturnValue(7 * 24 * 60 * 60 * 1000),
+      getRefreshTokenExpiresInMs: vi
+        .fn()
+        .mockReturnValue(7 * 24 * 60 * 60 * 1000),
       getRefreshTokenExpiresAt: vi.fn().mockReturnValue(mockExpiresAt),
     };
 
@@ -205,7 +223,7 @@ describe('AuthService', () => {
         data: {
           tokenHash: 'sha256-hashed-refresh-token',
           userId: 'user-uuid-1',
-          expiresAt: new Date('2026-10-01T00:00:00Z'),
+          expiresAt: mockExpiresAt,
         },
       });
     });
@@ -236,7 +254,258 @@ describe('AuthService', () => {
     });
   });
 
-  describe('setRefreshTokenCookie', () => {
+  describe('Refresh Token Rotation', () => {
+    const rawToken = 'valid-active-refresh-token';
+    const activeTokenRecord = {
+      id: 'old-token-uuid-1',
+      tokenHash: 'hashed-valid-active-refresh-token',
+      userId: 'user-uuid-1',
+      user: mockUser,
+      expiresAt: new Date(Date.now() + 1000000),
+      revokedAt: null,
+      replacedByTokenId: null,
+    };
+
+    it('valid cookie refreshes successfully with atomic rotation', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue(activeTokenRecord);
+      mockPrisma.refreshToken.create.mockResolvedValue({
+        id: 'new-token-uuid-2',
+      });
+      mockTokenService.generateRefreshToken.mockReturnValue(
+        'new-raw-refresh-token',
+      );
+
+      const result = await authService.refresh(rawToken);
+
+      // Verify access token generated
+      expect(mockTokenService.generateAccessToken).toHaveBeenCalledWith({
+        sub: 'user-uuid-1',
+        email: 'student@phoenix.edu',
+        role: RoleName.STUDENT,
+      });
+
+      // Verify transaction executed
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+
+      // Verify replacement token created
+      expect(mockPrisma.refreshToken.create).toHaveBeenCalledWith({
+        data: {
+          tokenHash: 'hashed-new-raw-refresh-token',
+          userId: 'user-uuid-1',
+          expiresAt: mockExpiresAt,
+        },
+      });
+
+      // Verify old token revoked conditionally and linked to replacement
+      expect(mockPrisma.refreshToken.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'old-token-uuid-1',
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: expect.any(Date),
+          replacedByTokenId: 'new-token-uuid-2',
+        },
+      });
+
+      // Verify response contains accessToken + sanitized user
+      expect(result.authResponse).toEqual({
+        accessToken: 'mock-jwt-access-token',
+        user: sanitizedUser,
+      });
+      expect(result.rawRefreshToken).toBe('new-raw-refresh-token');
+    });
+
+    it('concurrent refresh race: fails rotation and rolls back transaction if old token was revoked concurrently (updateMany count === 0)', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue(activeTokenRecord);
+      mockPrisma.refreshToken.create.mockResolvedValue({
+        id: 'new-token-uuid-concurrent',
+      });
+      // Simulate race: another concurrent transaction committed first, so conditional update affects 0 rows
+      mockPrisma.refreshToken.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(authService.refresh(rawToken)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      await expect(authService.refresh(rawToken)).rejects.toThrow(
+        'Invalid or expired refresh token.',
+      );
+
+      // Verify conditional check was performed with revokedAt: null
+      expect(mockPrisma.refreshToken.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'old-token-uuid-1',
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: expect.any(Date),
+          replacedByTokenId: 'new-token-uuid-concurrent',
+        },
+      });
+    });
+
+    it('rejects missing or empty token', async () => {
+      await expect(authService.refresh('')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      await expect(authService.refresh(undefined as any)).rejects.toThrow(
+        UnauthorizedException,
+      );
+    });
+
+    it('rejects unknown token hash not found in database', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue(null);
+
+      await expect(authService.refresh('unknown-token')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      await expect(authService.refresh('unknown-token')).rejects.toThrow(
+        'Invalid or expired refresh token.',
+      );
+    });
+
+    it('rejects expired refresh token', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue({
+        ...activeTokenRecord,
+        expiresAt: new Date(Date.now() - 5000), // Expired in the past
+      });
+
+      await expect(authService.refresh(rawToken)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockPrisma.refreshToken.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects revoked token without replacement (e.g. after logout)', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue({
+        ...activeTokenRecord,
+        revokedAt: new Date(),
+        replacedByTokenId: null,
+      });
+
+      await expect(authService.refresh(rawToken)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockPrisma.refreshToken.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects when user no longer exists', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue({
+        ...activeTokenRecord,
+        user: null,
+      });
+
+      await expect(authService.refresh(rawToken)).rejects.toThrow(
+        UnauthorizedException,
+      );
+    });
+  });
+
+  describe('Token Reuse Detection', () => {
+    it('detects rotated token reuse, revokes descendant chain, and rejects without issuing credentials', async () => {
+      // Token A was revoked and replaced by Token B
+      const tokenA = {
+        id: 'token-a-uuid',
+        tokenHash: 'hashed-token-a',
+        userId: 'user-uuid-1',
+        user: mockUser,
+        expiresAt: new Date(Date.now() + 100000),
+        revokedAt: new Date('2026-09-01'),
+        replacedByTokenId: 'token-b-uuid',
+      };
+
+      // Token B was revoked and replaced by Token C
+      const tokenB = {
+        id: 'token-b-uuid',
+        tokenHash: 'hashed-token-b',
+        userId: 'user-uuid-1',
+        expiresAt: new Date(Date.now() + 100000),
+        revokedAt: new Date('2026-09-02'),
+        replacedByTokenId: 'token-c-uuid',
+      };
+
+      // Token C is currently active
+      const tokenC = {
+        id: 'token-c-uuid',
+        tokenHash: 'hashed-token-c',
+        userId: 'user-uuid-1',
+        expiresAt: new Date(Date.now() + 100000),
+        revokedAt: null,
+        replacedByTokenId: null,
+      };
+
+      // Setup findUnique mock for traversal
+      mockPrisma.refreshToken.findUnique.mockImplementation(
+        async ({ where }: any) => {
+          if (where.tokenHash === 'hashed-token-a') return tokenA;
+          if (where.id === 'token-b-uuid') return tokenB;
+          if (where.id === 'token-c-uuid') return tokenC;
+          return null;
+        },
+      );
+
+      // Present reused Token A
+      await expect(authService.refresh('token-a')).rejects.toThrow(
+        UnauthorizedException,
+      );
+
+      // Verify Token C (the active descendant) was revoked
+      expect(mockPrisma.refreshToken.update).toHaveBeenCalledWith({
+        where: { id: 'token-c-uuid' },
+        data: { revokedAt: expect.any(Date) },
+      });
+
+      // Verify no new credentials were generated or stored
+      expect(mockPrisma.refreshToken.create).not.toHaveBeenCalled();
+      expect(mockTokenService.generateAccessToken).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Logout', () => {
+    it('active token is revoked upon logout', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue({
+        id: 'active-token-id',
+        tokenHash: 'hashed-active-token',
+        revokedAt: null,
+      });
+
+      await authService.logout('active-token');
+
+      expect(mockPrisma.refreshToken.update).toHaveBeenCalledWith({
+        where: { id: 'active-token-id' },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('logout succeeds idempotently with missing/undefined cookie', async () => {
+      await expect(authService.logout(undefined)).resolves.not.toThrow();
+      await expect(authService.logout('')).resolves.not.toThrow();
+      expect(mockPrisma.refreshToken.findUnique).not.toHaveBeenCalled();
+      expect(mockPrisma.refreshToken.update).not.toHaveBeenCalled();
+    });
+
+    it('logout succeeds idempotently with unknown token', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue(null);
+
+      await expect(authService.logout('unknown-token')).resolves.not.toThrow();
+      expect(mockPrisma.refreshToken.update).not.toHaveBeenCalled();
+    });
+
+    it('logout succeeds idempotently if token was already revoked', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue({
+        id: 'already-revoked-id',
+        tokenHash: 'hashed-revoked-token',
+        revokedAt: new Date(),
+      });
+
+      await expect(
+        authService.logout('already-revoked-token'),
+      ).resolves.not.toThrow();
+      expect(mockPrisma.refreshToken.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Cookie Management', () => {
     it('sets cookie with raw refresh token and secure options using TokenService lifetime', () => {
       const mockRes: any = {
         cookie: vi.fn(),
@@ -253,6 +522,23 @@ describe('AuthService', () => {
           sameSite: 'strict',
           path: '/api/auth',
           maxAge: 7 * 24 * 60 * 60 * 1000,
+        }),
+      );
+    });
+
+    it('clears refresh token cookie with matching security parameters', () => {
+      const mockRes: any = {
+        clearCookie: vi.fn(),
+      };
+
+      authService.clearRefreshTokenCookie(mockRes);
+
+      expect(mockRes.clearCookie).toHaveBeenCalledWith(
+        'phoenix_refresh_token',
+        expect.objectContaining({
+          httpOnly: true,
+          sameSite: 'strict',
+          path: '/api/auth',
         }),
       );
     });
